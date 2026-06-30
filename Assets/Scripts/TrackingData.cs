@@ -18,6 +18,16 @@ namespace Robot
 
         private JsonData _motionTrackingJson = new JsonData();
         private JsonData _bodyTrackingJson = new JsonData();
+
+        // BodyTrackerRole 0..23 == SMPL 24 joints.
+        public const int BodyJointCount = 24;
+
+        // Filled by TryGetBodyJointPoses and consumed by BOTH the JSON path
+        // (GetBodyTracking) and BodyPoseCsvLogger, so body acquisition has one source.
+        private readonly Vector3[] _bodyPositions = new Vector3[BodyJointCount];
+        private readonly Quaternion[] _bodyRotations = new Quaternion[BodyJointCount];
+        private BodyTrackingData _lastBodyData;
+        private bool _lastBodyDataValid;
         private JsonData _controllerDataJson = new JsonData();
         private JsonData _leftControllerJson = new JsonData();
         private JsonData _rightControllerJson = new JsonData();
@@ -109,24 +119,10 @@ namespace Robot
 
             if (TrackingTypeValue == TrackingType.Body)
             {
-                int state = 0;
-                PXR_Input.GetMotionTrackerCalibState(ref state);
-
-                if (state == 1)
+                // Acquire body joints via the single shared path (also used by the CSV logger).
+                if (TryGetBodyJointPoses(out _, out _))
                 {
-                    // Get the current tracking mode
-                    MotionTrackerMode trackingMode = PXR_MotionTracking.GetMotionTrackerMode();
-                    // Debug.Log("trackingMode::" + trackingMode);
-                    // Update human tracking pose data
-                    if (trackingMode == MotionTrackerMode.BodyTracking)
-                    {
-                        BodyTrackingGetDataInfo dataInfo = new BodyTrackingGetDataInfo();
-                        BodyTrackingData trackingData = new BodyTrackingData();
-                        // Obtain position and orientation data of each body node
-                        int ret = PXR_MotionTracking.GetBodyTrackingData(ref dataInfo, ref trackingData);
-                        JsonData json = GetBodyTracking(dataInfo, trackingData);
-                        totalData["Body"] = json;
-                    }
+                    totalData["Body"] = GetBodyTracking();
                 }
             }
             else
@@ -243,7 +239,56 @@ namespace Robot
         }
 
 
-        private JsonData GetBodyTracking(BodyTrackingGetDataInfo dataInfo, BodyTrackingData trackingData)
+        /// <summary>
+        /// Single source of truth for body-joint acquisition (old PICO SDK path):
+        /// calib-state guard -> mode guard -> GetBodyTrackingData, with the same
+        /// coordinate flip (PosZ / RotQz / RotQw negated) used by the JSON output.
+        /// Fills shared buffers and caches the raw frame for velocity reuse.
+        /// Used by both the JSON streaming path and BodyPoseCsvLogger.
+        /// </summary>
+        public bool TryGetBodyJointPoses(out Vector3[] positions, out Quaternion[] rotations)
+        {
+            positions = _bodyPositions;
+            rotations = _bodyRotations;
+            _lastBodyDataValid = false;
+
+            int state = 0;
+            PXR_Input.GetMotionTrackerCalibState(ref state);
+            if (state != 1)
+                return false;
+
+            if (PXR_MotionTracking.GetMotionTrackerMode() != MotionTrackerMode.BodyTracking)
+                return false;
+
+            BodyTrackingGetDataInfo dataInfo = new BodyTrackingGetDataInfo();
+            BodyTrackingData trackingData = new BodyTrackingData();
+            PXR_MotionTracking.GetBodyTrackingData(ref dataInfo, ref trackingData);
+            if (trackingData.roleDatas == null)
+                return false;
+
+            _lastBodyData = trackingData;
+            _lastBodyDataValid = true;
+
+            int count = Mathf.Min(trackingData.roleDatas.Length, BodyJointCount);
+            for (int i = 0; i < count; i++)
+            {
+                var localPose = trackingData.roleDatas[i].localPose;
+                _bodyPositions[i] = new Vector3(
+                    (float)localPose.PosX, (float)localPose.PosY, -(float)localPose.PosZ);
+                _bodyRotations[i] = new Quaternion(
+                    (float)localPose.RotQx, (float)localPose.RotQy, -(float)localPose.RotQz, -(float)localPose.RotQw);
+            }
+
+            for (int i = count; i < BodyJointCount; i++)
+            {
+                _bodyPositions[i] = Vector3.zero;
+                _bodyRotations[i] = Quaternion.identity;
+            }
+
+            return true;
+        }
+
+        private JsonData GetBodyTracking()
         {
             JsonData joints;
             if (_bodyTrackingJson.ContainsKey("joints"))
@@ -257,9 +302,9 @@ namespace Robot
                 _bodyTrackingJson["joints"] = joints;
             }
 
-            if (trackingData.roleDatas != null)
+            if (_lastBodyDataValid && _lastBodyData.roleDatas != null)
             {
-                int len = trackingData.roleDatas.Length;
+                int len = Mathf.Min(_lastBodyData.roleDatas.Length, BodyJointCount);
                 _motionTrackingJson["len"] = len;
 
                 for (int i = 0; i < len; i++)
@@ -275,23 +320,14 @@ namespace Robot
                         joints.Add(joint);
                     }
 
-                    Vector3 pos = new Vector3((float)trackingData.roleDatas[i].localPose.PosX,
-                        (float)trackingData.roleDatas[i].localPose.PosY,
-                        -(float)trackingData.roleDatas[i].localPose.PosZ);
+                    joint["p"] = GetPoseStr(_bodyPositions[i], _bodyRotations[i]);
 
-                    Quaternion rotation = new Quaternion((float)trackingData.roleDatas[i].localPose.RotQx,
-                        (float)trackingData.roleDatas[i].localPose.RotQy,
-                        -(float)trackingData.roleDatas[i].localPose.RotQz,
-                        -(float)trackingData.roleDatas[i].localPose.RotQw);
-
-                    joint["p"] = GetPoseStr(pos, rotation);
-
-                    joint["t"] = trackingData.roleDatas[i].localPose.TimeStamp;
+                    joint["t"] = _lastBodyData.roleDatas[i].localPose.TimeStamp;
                     unsafe
                     {
-                        fixed (double* pVelo = trackingData.roleDatas[i].velo, pAcce =
-                                   trackingData.roleDatas[i].acce, pWVelo =
-                                   trackingData.roleDatas[i].wvelo, pWAcce = trackingData.roleDatas[i].wacce)
+                        fixed (double* pVelo = _lastBodyData.roleDatas[i].velo, pAcce =
+                                   _lastBodyData.roleDatas[i].acce, pWVelo =
+                                   _lastBodyData.roleDatas[i].wvelo, pWAcce = _lastBodyData.roleDatas[i].wacce)
                         {
                             string va = pVelo[0] + "," + pVelo[1] + "," + pVelo[2] + "," + pAcce[0] + "," + pAcce[1] +
                                         "," + pAcce[2];

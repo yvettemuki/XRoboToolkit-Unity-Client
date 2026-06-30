@@ -216,7 +216,7 @@ public class UIOperate : MonoBehaviour
             HighAccuracy.gameObject.SetActive(false);
             return;
         }
-        
+
         // Update UI
         HighAccuracy.gameObject.SetActive(index > 0);
 
@@ -336,6 +336,7 @@ public class UIOperate : MonoBehaviour
         {
             int ret = PXR_MotionTracking.StopBodyTracking();
             BodyInfo.text = "BodyTracking close";
+            _bodyPoseLogger.Stop();
         }
         else
         {
@@ -356,10 +357,13 @@ public class UIOperate : MonoBehaviour
                 int ret = PXR_MotionTracking.StartBodyTracking(mode, boneLength);
                 BodyInfo.text = "Start BodyTracking " + ret;
                 Debug.Log(" UpdateBodyTracking :" + ret + " trackerSum:" + state.trackerSum);
+                // Plan B: start body-pose CSV logging as soon as Body tracking is selected.
+                _bodyPoseLogger.Start();
             }
             else if (tType == TrackingData.TrackingType.Motion)
             {
                 BodyInfo.text = "Start MotionTracking";
+                _bodyPoseLogger.Stop();
             }
         }
 
@@ -367,6 +371,10 @@ public class UIOperate : MonoBehaviour
     }
 
     private float _lastTime = 0;
+
+    // Body-pose CSV logger (format identical to ari-teleoperate-meta). Plan B:
+    // recording is driven by the Body mode selection, not the camera record button.
+    private readonly BodyPoseCsvLogger _bodyPoseLogger = new BodyPoseCsvLogger();
 
     // Update is called once per frame
     void Update()
@@ -388,6 +396,22 @@ public class UIOperate : MonoBehaviour
                 LogWindow.Info("Sending data: " + SendTog.isOn);
             }
         }
+
+        // No-ops unless body-pose recording is active.
+        _bodyPoseLogger.LogBodyPoses(Time.timeAsDouble);
+    }
+
+    private void OnApplicationPause(bool pauseStatus)
+    {
+        if (pauseStatus)
+        {
+            _bodyPoseLogger.Stop();
+        }
+    }
+
+    private void OnDestroy()
+    {
+        _bodyPoseLogger.Close();
     }
 
     public void OnQuitBtn()
