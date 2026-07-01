@@ -184,6 +184,16 @@ public class UIOperate : MonoBehaviour
         int res = 0;
         bool support = false;
 
+        // None means "turn tracking off": no tracker/calibration check needed.
+        // Go straight to UpdateBodyTracking() which stops body tracking and the logger.
+        if (tType == TrackingData.TrackingType.None)
+        {
+            HighAccuracy.gameObject.SetActive(false);
+            BodyInfo.color = Color.white;
+            UpdateBodyTracking();
+            return;
+        }
+
         MotionTrackerMode trackingMode = PXR_MotionTracking.GetMotionTrackerMode();
         if (tType == TrackingData.TrackingType.Body)
         {
@@ -399,6 +409,21 @@ public class UIOperate : MonoBehaviour
 
         // No-ops unless body-pose recording is active.
         _bodyPoseLogger.LogBodyPoses(Time.timeAsDouble);
+
+        // Show a live recording reminder in the status while recording.
+        if (_bodyPoseLogger.IsRecording)
+        {
+            if (_bodyPoseLogger.IsWriting)
+            {
+                BodyInfo.color = Color.green;
+                BodyInfo.text = $"● REC body pose... ({_bodyPoseLogger.RowCount} frames)";
+            }
+            else
+            {
+                BodyInfo.color = Color.yellow;
+                BodyInfo.text = "● REC armed - waiting for tracker calibration...";
+            }
+        }
     }
 
     private void OnApplicationPause(bool pauseStatus)

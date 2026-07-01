@@ -23,23 +23,29 @@ namespace Robot
         private StreamWriter _writer;
         private string _path;
         private bool _recording;
+        private int _rowCount;
 
         public bool IsRecording => _recording;
+        // True once the CSV file is actually open and frames are being written
+        // (recording can be armed but idle while waiting for tracker calibration).
+        public bool IsWriting => _writer != null;
+        public int RowCount => _rowCount;
         public string LastPath => _path;
 
         public void Start()
         {
             if (_recording) return;
             _recording = true;
-            Debug.Log("[BodyPoseCsvLogger] recording started.");
+            _rowCount = 0;
+            Debug.Log("[BodyPoseCsvLogger] === RECORD ARMED === waiting for tracker data/calibration.");
         }
 
         public void Stop()
         {
             if (!_recording && _writer == null) return;
             _recording = false;
+            Debug.Log($"[BodyPoseCsvLogger] === RECORD END === file: {_path} frames: {_rowCount}");
             Close();
-            Debug.Log($"[BodyPoseCsvLogger] recording stopped. File: {_path}");
         }
 
         public void Toggle()
@@ -56,6 +62,7 @@ namespace Robot
 
             int count = TrackingData.BodyJointCount;
             EnsureOpen(count);
+            _rowCount++;
 
             var ci = CultureInfo.InvariantCulture;
             var sb = new StringBuilder(512);
@@ -88,7 +95,7 @@ namespace Robot
                 header.Append($",j{i}_px,j{i}_py,j{i}_pz,j{i}_qx,j{i}_qy,j{i}_qz,j{i}_qw");
             _writer.WriteLine(header.ToString());
 
-            Debug.Log($"[BodyPoseCsvLogger] logging body poses to: {_path}");
+            Debug.Log($"[BodyPoseCsvLogger] === RECORD START === logging body poses to: {_path}");
         }
 
         public void Close()
